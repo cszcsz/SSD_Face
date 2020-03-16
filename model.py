@@ -179,3 +179,200 @@ class AuxiliaryConvolutions(nn.Module):
 
 
 class PredictionConvolutions(nn.Module):
+
+
+    def __init__(self, n_classes):
+
+        super(PredictionConvolutions, self).__init__()
+
+        self.n_classes = n_classes
+
+
+        # Localization prediction convolutions (predict offsets w.r.t prior-boxes)
+        self.loc_conv3_3 = nn.Conv2d(256, 4, kernel_size=3, padding=1)
+        self.loc_conv4_3 = nn.Conv2d(512, 4, kernel_size=3, padding=1)
+        self.loc_conv5_3 = nn.Conv2d(512, 4, kernel_size=3, padding=1)
+        self.loc_conv_fc7 = nn.Conv2d(1024, 4, kernel_size=3, padding=1)
+        self.loc_conv6_2 = nn.Conv2d(512, 4, kernel_size=3, padding=1)
+        self.loc_conv7_2 = nn.Conv2d(256, 4, kernel_size=3, padding=1)
+
+        # Class prediction convolutions (predict classes in localization boxes)
+        # conv3_3用了Max-out BG_label, 论文设置的Nm = 3， 所以Ns = Nm + n_class - 1 = 4
+        self.cl_conv3_3 = nn.Conv2d(256, 3 + (self.n_classes - 1), kernel_size=3, padding=1)
+        self.cl_conv4_3 = nn.Conv2d(512, self.n_classes, kernel_size=3, padding=1)
+        self.cl_conv5_3 = nn.Conv2d(512, self.n_classes, kernel_size=3, padding=1)
+        self.cl_conv_fc7 = nn.Conv2d(1024, self.n_classes, kernel_size=3, padding=1)
+        self.cl_conv6_2 = nn.Conv2d(512, self.n_classes, kernel_size=3, padding=1)
+        self.cl_conv7_2 = nn.Conv2d(256, self.n_classes, kernel_size=3, padding=1)
+
+        # Initialize convolutions' parameters
+        self.init_conv2d()
+
+    def init_conv2d(self):
+        """
+        Initialize convolution parameters.
+        """
+        for c in self.children():
+            if isinstance(c, nn.Conv2d):
+                nn.init.xavier_uniform_(c.weight)
+                nn.init.constant_(c.bias, 0.)
+
+    def forward(self, conv3_3_feats, conv4_3_feats, conv5_3_feats, conv_fc7_feats, conv6_2_feats, conv7_2_feats):
+        """
+        Forward propagation.
+        :param conv3_3_feats: conv3_3 feature map, a tensor of dimensions (N, 256, 160, 160)
+        :param conv4_3_feats: conv4_3 feature map, a tensor of dimensions (N, 512, 80, 80)
+        :param conv5_3_feats: conv5_3 feature map, a tensor of dimensions (N, 512, 40, 40)
+        :param conv_fc7_feats: conv_fc7_feats feature map, a tensor of dimensions (N, 1024, 20, 20)
+        :param conv6_2_feats: conv6_2_feats feature map, a tensor of dimensions (N, 512, 10, 10)
+        :param conv7_2_feats: conv7_2_feats feature map, a tensor of dimensions (N, 256, 5, 5)
+        
+        :return: 34125 locations and class scores (i.e. w.r.t each prior box) for each image
+        """
+        batch_size = conv3_3_feats.size(0)
+        # Predict localization boxes' bounds (as offsets w.r.t prior-boxes)
+        
+        l_conv3_3 = self.loc_conv3_3(conv3_3_feats)  # (N, 4, 160, 160)
+        l_conv3_3 = l_conv3_3.permute(0, 2, 3, 1).contiguous()  # (N, 160, 160, 4)，contiguous() ensures it is stored in a contiguous chunk of memory, needed for .view() below
+        l_conv3_3 = l_conv3_3.view(batch_size, -1, 4)   # (N, 25600, 4)
+
+        l_conv4_3 = self.loc_conv4_3(conv4_3_feats)  # (N, 4, 80, 80)
+        l_conv4_3 = l_conv4_3.permute(0, 2, 3, 1).contiguous()  # (N, 80, 80, 4)
+        l_conv4_3 = l_conv4_3.view(batch_size, -1, 4)   # (N, 6400, 4)
+
+        l_conv5_3 = self.loc_conv5_3(conv5_3_feats)  # (N, 4, 40, 40)
+        l_conv5_3 = l_conv5_3.permute(0, 2, 3, 1).contiguous()  # (N, 40, 40, 4)
+        l_conv5_3 = l_conv5_3.view(batch_size, -1, 4)   # (N, 1600, 4)
+
+        l_conv_fc7 = self.loc_conv_fc7(conv_fc7_feats)  # (N, 4, 20, 20)
+        l_conv_fc7 = l_conv_fc7.permute(0, 2, 3, 1).contiguous()  # (N, 20, 20, 4)
+        l_conv_fc7 = l_conv_fc7.view(batch_size, -1, 4)   # (N, 400, 4)
+
+        l_conv6_2 = self.loc_conv6_2(conv6_2_feats)  # (N, 4, 10, 10)
+        l_conv6_2 = l_conv6_2.permute(0, 2, 3, 1).contiguous()  # (N, 10, 10, 4)
+        l_conv6_2 = l_conv6_2.view(batch_size, -1, 4)   # (N, 100, 4)
+
+        l_conv7_2 = self.loc_conv7_2(conv7_2_feats)  # (N, 4, 5, 5)
+        l_conv7_2 = l_conv7_2.permute(0, 2, 3, 1).contiguous()  # (N, 5, 5, 4)
+        l_conv7_2 = l_conv7_2.view(batch_size, -1, 4)   # (N, 25, 4)
+
+        # Predict classes in localization boxes
+       
+        c_conv3_3 = self.cl_conv3_3(conv3_3_feats_norm)  # (N, 3 + n_classes - 1, 160, 160)
+        # apply Max-out BG label
+        max_c, _ = torch.max(c_conv3_3[:, 0:3, :, :], dim=1, keepdim=True)
+        c_conv3_3 = torch.cat((max_c, c_conv3_3[:, 3:, :, :]), dim=1)  # (N, n_classes, 160, 160)
+
+        c_conv3_3 = c_conv3_3.permute(0, 2, 3, 1).contiguous()  # (N, 160, 160, n_classes)
+        c_conv3_3 = c_conv3_3.view(batch_size, -1, self.n_classes)   # (N, 25600, n_classes)
+
+
+        c_conv4_3 = self.cl_conv4_3(conv4_3_feats_norm)  # (N, n_classes, 80, 80)
+        c_conv4_3 = c_conv4_3.permute(0, 2, 3, 1).contiguous()  # (N, 80, 80, n_classes)
+        c_conv4_3 = c_conv4_3.view(batch_size, -1, self.n_classes)   # (N, 6400, n_classes)
+    
+        c_conv5_3 = self.cl_conv5_3(conv5_3_feats_norm)  # (N, n_classes, 40, 40)
+        c_conv5_3 = c_conv5_3.permute(0, 2, 3, 1).contiguous()  # (N, 40, 40, n_classes)
+        c_conv5_3 = c_conv5_3.view(batch_size, -1, self.n_classes)   # (N, 1600, n_classes)
+
+        c_conv_fc7 = self.cl_conv_fc7(conv_fc7_feats)  # (N, n_classes, 20, 20)
+        c_conv_fc7 = c_conv_fc7.permute(0, 2, 3, 1).contiguous()  # (N, 20, 20, n_classes)
+        c_conv_fc7 = c_conv_fc7.view(batch_size, -1, self.n_classes)   # (N, 400, n_classes)
+
+        c_conv6_2 = self.cl_conv6_2(conv6_2_feats)  # (N, n_classes, 10, 10)
+        c_conv6_2 = c_conv6_2.permute(0, 2, 3, 1).contiguous()  # (N, 10, 10, n_classes)
+        c_conv6_2 = c_conv6_2.view(batch_size, -1, self.n_classes)   # (N, 100, n_classes)
+
+        c_conv7_2 = self.cl_conv7_2(conv7_2_feats)  # (N, n_classes, 5, 5)
+        c_conv7_2 = c_conv7_2.permute(0, 2, 3, 1).contiguous()  # (N, 5, 5, n_classes)
+        c_conv7_2 = c_conv7_2.view(batch_size, -1, self.n_classes)   # (N, 25, n_classes)
+
+        # Concatenate in this specific order (i.e. must match the order of the prior-boxes!!! )
+        locs = torch.cat([l_conv3_3, l_conv4_3, l_conv5_3, l_conv_fc7, l_conv6_2, l_conv7_2], dim=1)  # (N, 34125, 4)
+        classes_scores = torch.cat([c_conv3_3, c_conv4_3, c_conv5_3, c_conv_fc7, c_conv6_2, c_conv7_2], dim=1)  # (N, 34125, n_classes)
+
+        return locs, classes_scores
+
+
+
+class SSD_Face(nn.Module):
+    """
+    The SSD_Face network - encapsulates the base VGG network, auxiliary, and prediction convolutions.
+    """
+
+    def __init__(self, n_classes):
+        super(SSD_Face, self).__init__()
+
+        self.n_classes = n_classes
+
+        self.base = VGGBase()
+        self.aux_convs = AuxiliaryConvolutions()
+        self.pred_convs = PredictionConvolutions()
+
+        # 与论文一致
+        self.L2Norm3_3 = L2Norm(256, 10)
+        self.L2Norm4_3 = L2Norm(512, 8)
+        self.L2Norm5_3 = L2Norm(512, 5)
+
+        # Prior boxes
+        self.priors_cxcy = self.create_prior_boxes()
+
+    def forward(self, image):
+        """
+        Forward propagation.
+
+        :param image: images, a tensor of dimensions (N, 3, 640, 640)
+        :return: 34125 locations and class scores (i.e. w.r.t each prior box) for each image
+        """
+        # Run VGG base network
+        conv3_3_feats, conv4_3_feats, conv5_3_feats, conv_fc7_feats = self.base(image)
+
+        # apply L2 norm
+        conv3_3_feats = self.L2Norm3_3(conv3_3_feats)
+        conv4_3_feats = self.L2Norm4_3(conv4_3_feats)
+        conv5_3_feats = self.L2Norm5_3(conv5_3_feats)
+
+        # Run Auxiliary convolutions
+        conv6_2_feats, conv7_2_feats = self.aux_convs(conv_fc7_feats)
+
+        # Run Prediction convolutions(predict offsets w.r.t prior-boxes and classes in each resulting localization box)
+        locs, classes_scores = self.pred_convs(conv3_3_feats, conv4_3_feats, conv5_3_feats, conv_fc7_feats, conv6_2_feats, conv7_2_feats)
+
+        return locs, classes_scores
+
+    def create_prior_boxes(self):
+        """
+        Create the 34125 prior (default) boxes for the SSD_Face, as defined in the paper.
+
+        :return: prior boxes in center-size coordinates, a tensor of dimensions (34125, 4)
+        """
+
+        input_size = 640
+        feature_maps = [160, 80, 40, 20, 10, 5]
+        anchor_sizes = [16, 32, 64, 128, 256, 512]
+        steps = [4, 8, 16, 32, 64, 128]
+        imh = input_size
+        imw = input_size
+
+        prior_boxes = []
+
+        for k in range(len(feature_maps)):
+            feath = feature_maps[k]
+            featw = feature_maps[k]
+            for i, j in product(range(feath), range(featw)):
+                f_kw = imw / steps[k]
+                f_kh = imh / steps[k]
+
+                cx = (j + 0.5) / f_kw
+                cy = (i + 0.5) / f_kh
+
+                s_kw = anchor_sizes[k] / imw
+                s_kh = anchor_sizes[k] / imh
+
+                prior_boxes.append([cx, cy, s_kw, s_kh])
+
+        prior_boxes = torch.FloatTensor(prior_boxes).to(device)
+        prior_boxes.clamp_(min=0, max=1)    # (34125, 4)
+
+        return prior_boxes
+
